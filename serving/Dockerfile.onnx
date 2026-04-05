@@ -3,7 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir fastapi==0.111.0 uvicorn==0.30.1 \
-    optimum[onnxruntime]==1.19.0 transformers==4.41.2 pydantic==2.7.1
+    optimum[onnxruntime]==1.19.0 transformers==4.39.3 pydantic==2.7.1
 
 COPY onnx_model/ ./onnx_model/
 COPY app_onnx.py .
