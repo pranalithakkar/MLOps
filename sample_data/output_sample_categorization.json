@@ -1,0 +1,15 @@
+{
+  "transaction_id": "txn_a7f3c2e1-4b89-4d2a-89ac-12f345678901",
+  "model": "distilbert-categorization",
+  "model_version": "1.2.0",
+  "predictions": [
+    {"category": "Food at home", "probability": 0.912},
+    {"category": "Groceries", "probability": 0.871},
+    {"category": "Miscellaneous", "probability": 0.134}
+  ],
+  "top_category": "Food at home",
+  "confidence": 0.912,
+  "abstain": false,
+  "inference_latency_ms": 87,
+  "timestamp": "2024-03-15T14:23:07.412Z"
+}
