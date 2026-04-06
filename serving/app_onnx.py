@@ -1,94 +1,60 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from optimum.onnxruntime import ORTModelForSequenceClassification
-from transformers import AutoTokenizer, pipeline
+from transformers import DistilBertTokenizerFast
+import onnxruntime as ort
+import numpy as np, time, os
 from datetime import datetime, timezone
-import time
-
+from typing import List
 app = FastAPI()
-
-print('Loading ONNX model...')
-model = ORTModelForSequenceClassification.from_pretrained('./onnx_model')
-tokenizer = AutoTokenizer.from_pretrained('./onnx_model')
-classifier = pipeline(
-    'text-classification',
-    model=model,
-    tokenizer=tokenizer,
-    top_k=None
-)
-print('ONNX model loaded.')
-
-class Transaction(BaseModel):
+LABELS = ['Groceries','Food & Dining','Transport','Shopping','Entertainment','Utilities','Healthcare','Travel']
+MODEL_PATH = os.getenv('ONNX_MODEL_PATH', 'onnx_model/model.onnx')
+tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+sess = ort.InferenceSession(MODEL_PATH, providers=['CPUExecutionProvider'])
+class TxInput(BaseModel):
     transaction_id: str
-    user_id: str = ''
     description: str
     amount: float = 0.0
     currency: str = 'USD'
-    date: str = ''
-    account_id: str = ''
-    source: str = 'manual_entry'
-
+    country: str = 'US'
+    timestamp: str = ''
+class BatchInput(BaseModel):
+    transactions: List[TxInput]
+def run_inference(texts):
+    enc = tokenizer(texts, return_tensors='np', padding=True, truncation=True, max_length=48)
+    out = sess.run(None, {'input_ids': enc['input_ids'], 'attention_mask': enc['attention_mask']})
+    scores = 1 / (1 + np.exp(-out[0]))  # sigmoid
+    return scores
 @app.get('/health')
-def health():
-    return {'status': 'ok'}
-
+def health(): return {'status': 'ok'}
 @app.post('/predict')
-def predict(tx: Transaction):
-    start = time.time()
-    results = classifier(tx.description)
-    latency_ms = round((time.time() - start) * 1000, 2)
-
-    sorted_results = sorted(
-        results[0], key=lambda x: x['score'], reverse=True
-    )[:3]
-    top = sorted_results[0]
-    confidence = round(top['score'], 4)
-
+def predict(tx: TxInput):
+    t0 = time.time()
+    scores = run_inference([tx.description])[0]
+    latency_ms = round((time.time() - t0) * 1000, 2)
+    results = [{'category': LABELS[i], 'confidence': round(float(scores[i]), 4)}
+               for i in np.argsort(-scores) if scores[i] > 0.5]
+    confidence = float(np.max(scores))
     return {
         'transaction_id': tx.transaction_id,
         'model': 'distilbert-categorization',
         'model_version': '1.2.0-onnx',
-        'predictions': [
-            {'category': r['label'], 'probability': round(r['score'], 4)}
-            for r in sorted_results
-        ],
-        'top_category': top['label'],
-        'confidence': confidence,
-        'abstain': confidence < 0.7,
-        'inference_latency_ms': latency_ms,
+        'predicted_categories': results,
+        'abstained': confidence < 0.7,
+        'abstention_threshold': 0.7,
+        'max_confidence': round(confidence, 4),
+        'inference_time_ms': latency_ms,
         'timestamp': datetime.now(timezone.utc).isoformat()
     }
-
-class BatchTransaction(BaseModel):
-    transactions: list[Transaction]
-
 @app.post('/predict_batch')
-def predict_batch(batch: BatchTransaction):
-    start = time.time()
-    descriptions = [tx.description for tx in batch.transactions]
-    all_results = classifier(descriptions, batch_size=8)
-    total_latency_ms = round((time.time() - start) * 1000, 2)
-
-    output = []
-    for tx, results in zip(batch.transactions, all_results):
-        sorted_r = sorted(results, key=lambda x: x['score'], reverse=True)[:3]
-        top = sorted_r[0]
-        confidence = round(top['score'], 4)
-        output.append({
-            'transaction_id': tx.transaction_id,
-            'top_category': top['label'],
-            'confidence': confidence,
-            'abstain': confidence < 0.7,
-            'predictions': [
-                {'category': r['label'], 'probability': round(r['score'], 4)}
-                for r in sorted_r
-            ]
-        })
-
-    return {
-        'results': output,
-        'count': len(output),
-        'total_latency_ms': total_latency_ms,
-        'model_version': '1.2.0-onnx',
-        'timestamp': datetime.now(timezone.utc).isoformat()
-    }
+def predict_batch(batch: BatchInput):
+    t0 = time.time()
+    texts = [tx.description for tx in batch.transactions]
+    all_scores = run_inference(texts)
+    latency_ms = round((time.time() - t0) * 1000, 2)
+    results = []
+    for tx, scores in zip(batch.transactions, all_scores):
+        cats = [{'category': LABELS[i], 'confidence': round(float(scores[i]), 4)}
+                for i in np.argsort(-scores) if scores[i] > 0.5]
+        results.append({'transaction_id': tx.transaction_id, 'predicted_categories': cats,
+                         'max_confidence': round(float(np.max(scores)), 4)})
+    return {'results': results, 'batch_size': len(texts), 'inference_time_ms': latency_ms}
